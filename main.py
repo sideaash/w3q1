@@ -45,7 +45,8 @@ DATE_LABEL = r"Invoice\s*Date|Bill(?:ing)?\s*Date|Date\s*of\s*Issue|Dated|Issued
 LABELS = (
     r"Invoice\s*(?:No|Number|#)|Inv\.?\s*(?:No|#)|Ref(?:erence)?\.?\s*(?:No\.?|#)?|"
     rf"{DATE_LABEL}|"
-    r"Vendor(?:\s*Name)?|Seller|Bill(?:ed)?\s*(?:From|By)|Client|"
+    r"Vendor(?:\s*Name)?|Seller|Supplier|Company(?:\s*Name)?|Sold\s*By|Issued\s*By|"
+    r"Bill(?:ed)?\s*(?:From|By)|From|Client|"
     r"Sub\s*-?\s*Total|Taxable\s*(?:Value|Amount)|Net\s*Amount|Base\s*Amount|Amount|" + TAX_LABEL + r"|"
     r"Total\s*Due|Grand\s*Total|TOTAL|Total|Currency|Bill\s*To|Address|"
     r"Service|Description"
@@ -131,7 +132,7 @@ def extract_date(text: str) -> Optional[str]:
 
 def extract_vendor(text: str) -> Optional[str]:
     m = re.search(
-        rf"(?:Vendor(?:\s*Name)?|Seller|Bill(?:ed)?\s*(?:From|By))\s*[:\-]\s*(.*?){STOP}",
+        rf"(?:Vendor(?:\s*Name)?|Seller|Supplier|Company(?:\s*Name)?|Sold\s*By|Issued\s*By|Bill(?:ed)?\s*(?:From|By)|From)\s*[:\-]\s*(.*?){STOP}",
         text, re.IGNORECASE | re.DOTALL,
     )
     if m:
