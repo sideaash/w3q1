@@ -40,16 +40,46 @@ class InvoiceResponse(BaseModel):
 # Labels that can appear in invoices. Used as "stop words" so a value capture
 # doesn't accidentally swallow the next field (important because some sample
 # invoices have no newlines between fields).
-TAX_LABEL = r"(?:I?C?S?GST|VAT|Tax)(?:\s*\([\d.]+%\))?"
+TAX_LABEL = r"(?:I?C?S?GST|VAT|Tax)(?:\s*\([\d.]+%\))?(?:\s*Amount|\s*Value)?"
+DATE_LABEL = r"Invoice\s*Date|Bill(?:ing)?\s*Date|Date\s*of\s*Issue|Dated|Issued|Issue\s*Date|Date"
 LABELS = (
     r"Invoice\s*(?:No|Number|#)|Inv\.?\s*(?:No|#)|Ref(?:erence)?\.?\s*(?:No\.?|#)?|"
-    r"(?:Invoice\s*)?Date|Issued|Issue\s*Date|"
+    rf"{DATE_LABEL}|"
     r"Vendor(?:\s*Name)?|Seller|Bill(?:ed)?\s*(?:From|By)|Client|"
-    r"Sub\s*-?\s*Total|Amount|" + TAX_LABEL + r"|"
+    r"Sub\s*-?\s*Total|Taxable\s*(?:Value|Amount)|Net\s*Amount|Base\s*Amount|Amount|" + TAX_LABEL + r"|"
     r"Total\s*Due|Grand\s*Total|TOTAL|Total|Currency|Bill\s*To|Address|"
     r"Service|Description"
 )
 STOP = rf"(?={LABELS}|\Z)"
+
+# Generic date-like pattern, used as a last-resort scan when no labeled
+# date field is found at all.
+GENERIC_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\.?\s+\d{4}"       # 10 March 2026 / 10th Mar. 2026
+    r"|[A-Za-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}"          # March 10, 2026
+    r"|\d{4}[-/]\d{1,2}[-/]\d{1,2}"                               # 2026-03-10
+    r"|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b"                        # 10-03-2026 / 10/03/26
+)
+
+
+def _parse_date_string(raw: str) -> Optional[str]:
+    """Parse a date substring into YYYY-MM-DD, handling ISO strings
+    explicitly first so dayfirst-parsing can't scramble them."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    iso_m = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$", raw)
+    if iso_m:
+        y, mo, d = (int(x) for x in iso_m.groups())
+        try:
+            return datetime(y, mo, d).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+    try:
+        dt = dateparser.parse(raw, dayfirst=True, fuzzy=True)
+        return dt.strftime("%Y-%m-%d")
+    except (ValueError, OverflowError, TypeError):
+        return None
 
 
 def _clean(s: str) -> str:
@@ -84,19 +114,19 @@ def extract_invoice_no(text: str) -> Optional[str]:
 
 def extract_date(text: str) -> Optional[str]:
     m = re.search(
-        rf"(?<!Invoice\s)(?<!Inv\s)\b(?:Date|Issued|Issue\s*Date)\s*[:\-]?\s*(.*?){STOP}",
+        rf"\b(?:{DATE_LABEL})\s*[:\-]?\s*(.*?)\s*{STOP}",
         text, re.IGNORECASE | re.DOTALL,
     )
-    if not m:
-        return None
-    raw = _clean(m.group(1))
-    if not raw:
-        return None
-    try:
-        dt = dateparser.parse(raw, dayfirst=True, fuzzy=True)
-        return dt.strftime("%Y-%m-%d")
-    except (ValueError, OverflowError):
-        return None
+    if m:
+        result = _parse_date_string(m.group(1))
+        if result:
+            return result
+    # Fallback: no recognizable label, or the captured text wasn't a valid
+    # date (e.g. label matched but value was garbage). Scan the whole text.
+    gm = GENERIC_DATE_RE.search(text)
+    if gm:
+        return _parse_date_string(gm.group(0))
+    return None
 
 
 def extract_vendor(text: str) -> Optional[str]:
@@ -126,14 +156,22 @@ def extract_vendor(text: str) -> Optional[str]:
 
 
 def extract_amount(text: str) -> Optional[float]:
-    # Subtotal / Sub Total is the amount BEFORE tax.
-    m = re.search(rf"Sub\s*-?\s*Total\s*[:\-]?\s*(.*?){STOP}", text, re.IGNORECASE | re.DOTALL)
+    # Subtotal / Sub Total / Taxable Value / Net Amount etc. are the amount
+    # BEFORE tax.
+    m = re.search(
+        rf"(?:Sub\s*-?\s*Total|Taxable\s*(?:Value|Amount)|Net\s*Amount|Base\s*Amount)\s*[:\-]?\s*(.*?)\s*{STOP}",
+        text, re.IGNORECASE | re.DOTALL,
+    )
     if m:
         val = _to_number(m.group(1))
         if val is not None:
             return val
-    # Fallback: a standalone "Amount:" field (not "Total"/"Grand Total")
-    m = re.search(rf"(?<!Sub)\bAmount\s*[:\-]?\s*(.*?){STOP}", text, re.IGNORECASE | re.DOTALL)
+    # Fallback: a standalone "Amount:" field — but NOT "Tax Amount",
+    # "GST Amount" etc. (those belong to extract_tax, not here).
+    m = re.search(
+        rf"(?<!Tax\s)(?<!GST\s)(?<!VAT\s)(?<!IGST\s)(?<!CGST\s)(?<!SGST\s)(?<!Sub\s)\bAmount\b\s*[:\-]?\s*(.*?)\s*{STOP}",
+        text, re.IGNORECASE | re.DOTALL,
+    )
     if m:
         return _to_number(m.group(1))
     return None
